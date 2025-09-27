@@ -9,6 +9,7 @@ export default function RootLayout() {
         headerTitleStyle: { fontWeight: "bold" },
       }}
     >
+      <Stack.Screen name="setup" options={{ title: "Setup" }} />
       <Stack.Screen name="index" options={{ title: "PitchPlay" }} />
       <Stack.Screen name="game" options={{ title: "Game" }} />
       <Stack.Screen name="results" options={{ title: "Results" }} />
