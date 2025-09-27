@@ -1,105 +1,180 @@
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, Pressable } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import React, { useState } from "react";
+import { View, Text, Button, StyleSheet } from "react-native";
 import { Audio } from "expo-av";
-
-const NOTES = ["C4", "D4", "E4", "F4", "G4", "A4", "B4"];
+import * as FileSystem from "expo-file-system";
+import WavDecoder from "wav-decoder";
+import { detectPitch } from "pitchy";
 
 export default function GameScreen() {
-  const { players } = useLocalSearchParams<{ players: string }>();
-  const totalPlayers = Number(players) || 1;
+  const [phase, setPhase] = useState<"tone" | "sing" | "stop">("tone");
+  const [isPlayingTone, setIsPlayingTone] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [scores, setScores] = useState<number[]>([]);
+  const [countdown, setCountdown] = useState<number | null>(null);
 
-  const [currentPlayer, setCurrentPlayer] = useState(1);
-  const [currentNote, setCurrentNote] = useState<string | null>(null);
-  const [phase, setPhase] = useState<"idle" | "reference" | "challenge" | "done">("idle");
-  const router = useRouter();
-
-  // Helper: play an A tone (440 Hz) for 3 seconds
-  const playReferenceTone = async () => {
+  // 🔊 Play reference tone (A4)
+  const playTone = async () => {
     try {
-      const { sound } = await Audio.Sound.createAsync(
-        require("../assets/a4_note.wav") // we’ll add this file in Step 3
-      );
-      await sound.playAsync();
+      setIsPlayingTone(true);
+      setCountdown(3);
 
-      // Stop after 3 seconds
+      // Simple countdown
+      let timer = 3;
+      const interval = setInterval(() => {
+        timer -= 1;
+        if (timer > 0) {
+          setCountdown(timer);
+        } else {
+          clearInterval(interval);
+          setCountdown(null);
+        }
+      }, 1000);
+
+      const { sound } = await Audio.Sound.createAsync(
+        require("../assets/a4_note.wav"),
+        { shouldPlay: true, volume: 1.0 }
+      );
+
+      await sound.playAsync();
       setTimeout(async () => {
         await sound.stopAsync();
         await sound.unloadAsync();
+        setIsPlayingTone(false);
+        setPhase("sing");
       }, 3000);
-    } catch (err) {
-      console.error("Error playing tone", err);
+    } catch (e) {
+      console.error("Error playing tone", e);
+      setIsPlayingTone(false);
     }
   };
 
-  useEffect(() => {
-    if (phase === "reference") {
-      playReferenceTone(); // 🔊 Play A note
-      // After 3s, show random note
-      setTimeout(() => {
-        const random = NOTES[Math.floor(Math.random() * NOTES.length)];
-        setCurrentNote(random);
-        setPhase("challenge");
-      }, 3000);
-    } else if (phase === "challenge") {
-      // After 5s, go to next player or finish
-      setTimeout(() => {
-        if (currentPlayer < totalPlayers) {
-          setCurrentPlayer((p) => p + 1);
-          setPhase("reference");
-        } else {
-          setPhase("done");
-        }
-      }, 5000);
+  // 🎙 Start recording (force WAV format)
+  const startRecording = async () => {
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) {
+        alert("Microphone permission required!");
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const rec = new Audio.Recording();
+      await rec.prepareToRecordAsync({
+        android: {
+          extension: ".wav",
+          outputFormat:
+            Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_LINEAR_PCM,
+          audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_DEFAULT,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          bitRate: 128000,
+        },
+        ios: {
+          extension: ".wav",
+          outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_LINEARPCM,
+          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
+      });
+      await rec.startAsync();
+      setRecording(rec);
+      setPhase("stop");
+    } catch (err) {
+      console.error("Failed to start recording", err);
     }
-  }, [phase, currentPlayer]);
+  };
+
+  // 🛑 Stop recording and detect pitch
+  const stopRecording = async () => {
+    try {
+      if (!recording) return;
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecording(null);
+
+      if (uri) {
+        // 1. Read as Base64
+        const fileBuffer = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
+        // 2. Convert Base64 → Uint8Array
+        const byteArray = Uint8Array.from(atob(fileBuffer), (c) =>
+          c.charCodeAt(0)
+        );
+
+        // 3. Decode WAV
+        const audioData = await WavDecoder.decode(Buffer.from(byteArray.buffer));
+
+        // 4. Take first channel
+        const channelData = audioData.channelData[0];
+
+        // 5. Detect pitch
+        const [pitch, clarity] = detectPitch(channelData, audioData.sampleRate);
+
+        console.log("Detected pitch:", pitch, "Hz — Clarity:", clarity);
+
+        const score = Math.round(clarity * 100);
+        setScores((prev) => [...prev, score]);
+      }
+
+      setPhase("tone"); // next round
+    } catch (err) {
+      console.error("Failed to stop recording", err);
+    }
+  };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>🎵 PitchPlay 🎵</Text>
+      <Text style={styles.title}>🎤 PitchPlay</Text>
 
-      {phase === "idle" && (
-        <Pressable
-          style={styles.button}
-          onPress={() => setPhase("reference")}
-        >
-          <Text style={styles.buttonText}>Start Player {currentPlayer}</Text>
-        </Pressable>
+      {countdown !== null && (
+        <Text style={styles.countdown}>{countdown}</Text>
       )}
 
-      {phase === "reference" && (
-        <Text style={styles.info}>
-          🎹 Playing reference A note for Player {currentPlayer}...
-        </Text>
+      {phase === "tone" && (
+        <Button
+          title={isPlayingTone ? "Playing..." : "Play Tone"}
+          onPress={playTone}
+          disabled={isPlayingTone}
+        />
+      )}
+      {phase === "sing" && (
+        <Button title="Start Singing" onPress={startRecording} />
+      )}
+      {phase === "stop" && (
+        <Button title="Stop & Score" onPress={stopRecording} />
       )}
 
-      {phase === "challenge" && (
-        <Text style={styles.info}>
-          🎤 Player {currentPlayer}, sing: {currentNote}
-        </Text>
-      )}
-
-      {phase === "done" && (
-        <Pressable
-          style={styles.button}
-          onPress={() => router.push("/results")}
-        >
-          <Text style={styles.buttonText}>See Results</Text>
-        </Pressable>
-      )}
+      {/* Scoreboard */}
+      <View style={styles.scoreboard}>
+        <Text style={styles.subtitle}>🏆 Scoreboard</Text>
+        {scores.map((s, i) => (
+          <Text key={i}>Player {i + 1}: {s}%</Text>
+        ))}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
-  title: { fontSize: 28, fontWeight: "bold", marginBottom: 20, color: "#6C63FF" },
-  info: { fontSize: 20, textAlign: "center", marginBottom: 20 },
-  button: {
-    backgroundColor: "#6C63FF",
-    paddingVertical: 15,
-    paddingHorizontal: 40,
-    borderRadius: 25,
+  container: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
+  title: { fontSize: 24, marginBottom: 16, fontWeight: "bold" },
+  subtitle: { fontSize: 18, marginTop: 20, fontWeight: "600" },
+  countdown: { fontSize: 48, fontWeight: "bold", marginVertical: 20 },
+  scoreboard: {
+    position: "absolute",
+    bottom: 40,
+    left: 20,
+    right: 20,
+    alignItems: "center",
   },
-  buttonText: { color: "#fff", fontSize: 18, fontWeight: "bold" },
 });
